@@ -12,9 +12,6 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Analysis of BC tumors
 ***
-Sys.setenv(R_REMOTES_NO_ERRORS_FROM_WARNINGS = TRUE)
-options(download.file.method = "curl")  # or "libcurl"
-remotes::install_github("jbergenstrahle/STUtility")
 
 <br>
 ```{r setup_env}
@@ -29,9 +26,17 @@ suppressPackageStartupMessages({
   library(KODAMA)
 
 })
+
+
+
+options(download.file.method = "curl")  # or "libcurl"
+remotes::install_github("jbergenstrahle/STUtility")
+
+
 install.packages("remotes")
-options(download.file.method = "wget")
-remotes::install_github("jbergenstrahle/STutility")
+remotes::install_github("ludvigla/semla")
+install.packages("Seurat")
+setwd("C:/Users/doaad/Downloads/code/her2st-master/scripts")
 
 ```
 <br>
@@ -50,12 +55,12 @@ First, set up a meta.data table for the project. We have some limited patient da
 
 library(openxlsx)
 
-meta_data <- read.csv("~/Downloads/her2st-master/data/clinical_data/meta_data.csv")
+meta_data <- read.xlsx("C:/Users/doaad/Downloads/code/her2st-master/data/clinical_data/10_HER2+_info.xlsx")
 rownames(meta_data) <- meta_data$Sample
 samples <- list.files(pattern = ".tsv", path = "../data/ST-cnts/", full.names = T)
-names(samples) <- substr(do.call(rbind, strsplit(samples, split = "/"))[, 5], start = 1, stop = 2)
+names(samples) <- substr(do.call(rbind, strsplit(samples, split = "/"))[, 4], start = 1, stop = 2)
 imgs <- list.files(path = "../data/ST-imgs/", recursive = T, full.names = T, pattern = ".jpg")
-names(imgs) <- do.call(rbind, strsplit(imgs, split = "/"))[, 6]
+names(imgs) <- do.call(rbind, strsplit(imgs, split = "/"))[, 5]
 ids <- names(samples)
 infoTable <- data.frame(samples, imgs = imgs[ids], ids, patient_id = substr(x = ids, start = 1, stop = 1), stringsAsFactors = FALSE)
 infoTable <- cbind(infoTable, meta_data[infoTable$patient_id, ])
@@ -69,13 +74,8 @@ Subset infoTable to include specified datasets.
 <br>
 ```{r subset}
 
-infoTable$spotfiles <- list.files(path = "../data/ST-spotfiles", full.names = T)[1:12]
+infoTable$spotfiles <- list.files(path = "../data/ST-spotfiles", full.names = T)[1:36]
 head(infoTable)
-# Assuming the patient ID column is called 'patient_id'
-patient_data <- infoTable[infoTable$patient_id == "B", ]
-
-# View the filtered data
-head(patient_data)
 
 ```
 <br>
@@ -87,29 +87,41 @@ Load all patient datasets and merge into one Seurat object per patient. Each gen
 
 <br>
 ```{r cca_list}
-# Custom function to process patient data
 
-seu.list <- lapply(unique(patient_data$patient_id), function(s) {
-    InputFromTable(infotable = subset(patient_data, patient_id == s), 
-                      min.gene.spots = 20,
-                      min.spot.feature.count = 300,
-                      platform = "1k")
-}) 
+install.packages('R.utils')
+
+# Define patient IDs from A to H
+valid_patients <- LETTERS[1:8]  
+
+# Filter the infoTable to include only these patients
+patients <- unique(infoTable$patient_id)
+patients <- patients[patients %in% valid_patients]  # Keep only A to H
+
+# Initialize an empty list to store results
+seu.list <- list()
+
+# Loop through each patient_id (A to H)
+for (s in patients) {  
+    seu.list[[s]] <- InputFromTable(
+        infotable = subset(infoTable, patient_id == s), 
+        min.gene.spots = 20,
+        min.spot.feature.count = 300,
+        platform = "1k"
+    )
+}
+
 
 ```
 <br>
 
 Calculate some QC metrics
+
 <br>
 ```{r all_samples_stats}
 
 total.qc <- do.call(rbind, lapply(seu.list, function(se) {
-  data.frame(
-    total_UMIs = sum(GetAssayData(se, slot = "counts")), 
-    nSpots = ncol(se)
-  )
+  data.frame(total_UMIs = sum(se@assays$RNA$counts), nSpots = ncol(se))
 }))
-
 
 sum(total.qc$nSpots)
 
@@ -136,7 +148,7 @@ Plot total number of unique features per spot and sample for each patient datase
 <br>
 ```{r UMIs_per_sample, fig.width=9, fig.height=6}
 
-for (seu in seu.list[5:6]) {
+for (seu in seu.list[5:8]) {
     seu <- SetIdent(seu, value = "ids")
     p1 <- VlnPlot(seu, features = "nFeature_RNA")
     p2 <- ST.FeaturePlot(seu, features = "nFeature_RNA", palette = "GrRd")
@@ -150,43 +162,29 @@ We will also create a separate seurat object including all the samples to show t
 
 <br>
 ```{r all_samples_se}
-# Increase the memory limit to a higher value if necessary
-options(future.globals.maxSize = 1500 * 1024^2)  # Set to 1500 MiB (adjust as needed)
+library(dplyr)
+# Define the patient IDs from A to H
+patient_ids <- LETTERS[1:8]  # Generates "A", "B", ..., "H"
 
-# Free up memory used by large objects before starting
-gc()
+# Create a list to store Seurat objects for each patient
+seu.list <- lapply(patient_ids, function(s) {
+    # Subset the infoTable for the current patient ID
+    subset_table <- subset(infoTable, patient_id == s)
+    
+    # Process the data using InputFromTable
+    seu_obj <- InputFromTable(infotable = subset_table, 
+                              min.gene.spots = 50,
+                              min.spot.feature.count = 300, 
+                              platform = "1k")
+    
+    # Apply SCTransform and PCA
+    seu_obj <- seu_obj %>% SCTransform() %>% RunPCA()
+    
+    return(seu_obj)
+})
 
-# Adjust control for iteration limit
-control <- list(maxit = 1000)  # Increase max iteration limit
-
-# Step 1: Input data and create Seurat object
-object <- InputFromTable(infotable = patient_data, 
-                         min.gene.spots = 50,
-                         min.spot.feature.count = 300, 
-                         platform = "1k")
-
-# Step 2: Take a random subset of cells (e.g., 10% of the total cells)
-# Make sure the number of cells is within reasonable limits to prevent memory overflow
-object <- SketchData(object, ncells = min(10000, ncol(object)), method = "LeverageScore", sketched.assay = "sketch")
-
-# Step 3: Set the default assay and preprocess the data
-DefaultAssay(object) <- "sketch"
-object <- FindVariableFeatures(object)
-object <- NormalizeData(object)
-
-# Use a smaller dataset or batch operations to avoid memory overload
-object <- ScaleData(object)
-library(tidyverse)
-
-# Avoid holding large intermediate results if not needed
-object <- object %>% SCTransform()
-
-# Run PCA on the subset, breaking the operation into manageable chunks if necessary
-object <- RunPCA(object)
-
-# Monitor memory usage and free up memory between heavy operations
-gc()
-
+# Name the list elements based on patient IDs
+names(seu.list) <- patient_ids
 
 
 ```
@@ -196,27 +194,117 @@ Run UMAP and color spots by patient to viusalize the global differences between 
 
 <br>
 ```{r UMAP_all}
-object <- FindNeighbors(object, dims = 1:20)
-object <- FindClusters(object, resolution = 0.5)
+# Run UMAP for each sample in seu.list
+seu.list <- lapply(seu.list, function(seu) {
+  seu <- RunUMAP(seu, reduction = "pca", dims = 1:20)
+  seu <- SetIdent(seu, value = "ids")
+  return(seu)
+})
 
-object <- SetIdent(object, value = "ids")
-object <- RunUMAP(object, reduction = "pca", dims = 1:20)
-# Option 1: Using RColorBrewer for distinct colors
-library(RColorBrewer)
-distinct_colors <- brewer.pal(n = length(unique(object$seurat_clusters)), name = "Set3")
+# Visualize each sample separately
+p_list <- lapply(seu.list, function(seu) {
+  DimPlot(seu) + ggtitle(unique(seu$ids))
+})
 
-DimPlot(object, label = T)
-str(object)
-object <- ProjectData(object, assay = "SCT", full.reduction = "SCT.pca",
-                      sketched.assay = "sketch", sketched.reduction = "pca",
-                      umap.model = "umap", dims = 1:20,
-                      refdata = list(seurat_clusters.full = "seurat_clusters"))
+# Print all plots
+p_list
+```
+
+
+```{r UMAP_all}
+matrix_data <- GetAssayData(seu.list[[i]], slot = "scale.data")
+if (!is.null(matrix_data) && nrow(matrix_data) > 0) {
+  matrix_data <- as.matrix(matrix_data)
+  seu.list[[i]]@misc$kodama <- KODAMA::KODAMA.matrix(matrix_data)
+  seu.list[[i]]@misc$kodama_vis <- KODAMA::KODAMA.visualization(matrix_data, method = "t-SNE")
+} else {
+  warning("Skipping KODAMA for sample ", names(seu.list)[i], ": No valid expression data.")
+}
+
+```
+
+
+```{r UMAP_all}
+# Loop through each sample in seu.list
+for (i in seq_along(seu.list)) {
+  cat("Processing sample:", names(seu.list)[i], "\n")
+
+  # Ensure the object is Seurat before applying transformations
+  if (!inherits(seu.list[[i]], "Seurat")) {
+    next
+  }
+
+  # SCTransform with increased genes
+  seu.list[[i]] <- SCTransform(seu.list[[i]], assay = "RNA", verbose = TRUE, n_genes = 3000, conserve.memory = FALSE)
+
+  # PCA and Clustering
+  seu.list[[i]] <- RunPCA(seu.list[[i]], assay = "SCT", verbose = TRUE)
+  seu.list[[i]] <- FindNeighbors(seu.list[[i]], reduction = "pca", dims = 1:30, verbose = TRUE)
+  seu.list[[i]] <- FindClusters(seu.list[[i]], resolution = 0.6, n.start = 20, verbose = TRUE)
+
+  # Convert Seurat expression matrix for KODAMA
+  matrix_data <- as.matrix(GetAssayData(seu.list[[i]], layer = "scale.data"))
+  
+  # Run KODAMA if the matrix is valid
+  if (!is.null(matrix_data) && nrow(matrix_data) > 0) {
+    seu.list[[i]]@misc$kodama <- KODAMA::KODAMA.matrix(matrix_data)
+    seu.list[[i]]@misc$kodama_vis <- KODAMA::KODAMA.visualization(matrix_data, method = "UMAP")
+  } else {
+    warning("Skipping KODAMA for sample ", names(seu.list)[i], ": No valid expression data.")
+  }
+}
+
+cat("Processing complete! ✅\n")
 
 ```
 <br>
 
 ### QC 
 ***
+install.packages("devtools")  # Install devtools if you haven't
+devtools::install_github("author/KODAMAextra")  # Replace 'author' with the actual GitHub username/repo
+
+data_matrix <- Embeddings(seu, reduction = "pca")
+kodama_result <- KODAMA::KODAMA.matrix(data_matrix)
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("KODAMAextra")
+library(KODAMAextra)
+# Run KODAMA matrix computation
+  seurat_objects[[i]] <- RunKODAMAmatrix(seurat_objects[[i]],
+                                         FUN = "fastpls",
+                                         landmarks = 100000, splitting = 100,
+                                         ncomp = 50, n.cores = 3)
+  
+  # Run KODAMA visualization
+  seurat_objects[[i]] <- RunKODAMAvisualization(seurat_objects[[i]], method = "t-SNE")
+}
+
+saveRDS(seurat_objects, "seurat_objects.rds")
+
+cc <- KODAMA::KODAMA.visualization(kodama_result, method = "t-SNE")
+library(Seurat)
+seu[["kodama"]] <- CreateDimReducObject(embeddings = cc,
+                                           key = "KODAMA_",
+                                           assay = DefaultAssay(seu))
+kodama_data <- data.frame(
+  KODAMA_1 = cc[, 1],
+  KODAMA_2 = cc[, 2],
+  label = seu@meta.data$ids
+)
+
+
+pdf("kodama_plot.pdf")  # Saves the plot as a PDF
+ggplot(kodama_data, aes(x = KODAMA_1, y = KODAMA_2, color = label)) +
+  geom_point(size = 3) +
+  theme_minimal() +
+  labs(title = "Kodama Dimensionality Reduction",
+       x = "KODAMA_1",
+       y = "KODAMA_2",
+       color = "ids")
+dev.off()  # Close the graphics device
+
 
 Compute qc stats for a supplementary table. The stats should describe a feature of a section dataset, e.g. average number of UMIs. The qc stats included are:
 
@@ -234,16 +322,11 @@ Compute qc stats for a supplementary table. The stats should describe a feature 
 ```{r QC}
 
 qcMat <- do.call(rbind, lapply(1:length(seu.list), function(i) {
-    object <- seu.list[[i]]
-    do.call(rbind, lapply(unique(object[["ids", drop = TRUE]]), function(id) {
-        # Use GetAssayData to retrieve count data
-        repMat <- GetAssayData(object, assay = "RNA", slot = "counts")[, object[["ids", drop = TRUE]] == id]
-        
-        # Calculate the UMI and gene counts
+    seu <- seu.list[[i]]
+    do.call(rbind, lapply(unique(seu[["ids", drop = T]]), function(id) {
+        repMat <- seu@assays$RNA@counts[, seu[["ids", drop = T]] == id]
         nUMI <- Matrix::colSums(repMat)
         nGene <- apply(repMat, 2, function(x) sum(x > 0))
-        
-        # Create the data frame with QC metrics
         data.frame(sample = id, 
                    avg.nUMI = round(mean(nUMI)),
                    median.nUMI = median(nUMI),
@@ -269,28 +352,12 @@ and `variable.features.n = NULL` to return the residual variance for all genes a
 <br>
 ```{r SCTransform, warning=FALSE}
 
-# Determine the number of Seurat objects
-num_seus <- length(seu.list)
-
-# Calculate the midpoint to select half of the objects
-midpoint <- floor(num_seus / 2)
-
-# Select the first half of the Seurat objects
-seu_half <- seu.list[1:midpoint]
-
-# Transform each selected Seurat object with error handling and progress reporting
-seu_half_transformed <- lapply(seu_half, function(seu) {
-  tryCatch({
-    # Apply SCTransform to the Seurat object
-    transformed_seu <- SCTransform(seu, 
-                                    vars.to.regress = c("ids"), 
-                                    return.only.var.genes = FALSE, 
-                                    variable.features.n = NULL, 
-                                    variable.features.rv.th = 1.1)
-    return(transformed_seu)  # Return the transformed Seurat object
-  }, error = function(e) {
-    return(seu)  # Return the original Seurat object in case of an error
-  })
+seu.list <- lapply(seu.list, function(seu) {
+  SCTransform(seu, 
+              vars.to.regress = c("ids"), 
+              return.only.var.genes = FALSE, 
+              variable.features.n = NULL, 
+              variable.features.rv.th = 1.1)
 })
 
 ```
@@ -305,34 +372,9 @@ Load images into a low resolution representation with a width of 400 pixels. Thi
 <br>
 ```{r load_images}
 
-library(SpatialExperiment)
-library(scater)
-library(nnSVG)
-library(SPARK)
-library(harmony)
-library(scuttle)
-library(BiocSingular)
-library(spatialLIBD)
-library(KODAMAextra)
-library(ggplot2)
-data_matrix <- Embeddings(object, reduction = "pca")[, 1:20]  # PCA embeddings (first 20 dimensions)
-kodama_result <- KODAMA::KODAMA.matrix(data_matrix)
-cc <- KODAMA::KODAMA.visualization(kodama_result, method="UMAP")
-object[["kodama"]] <- CreateDimReducObject(embeddings = cc,
-                                           key = "KODAMA_",
-                                           assay = DefaultAssay(object))
-kodama_data <- data.frame(First_Dimension = cc[, 1],
-                          Second_Dimension = cc[, 2],
-                          label = object@meta.data$ids)
-
-ggplot(kodama_data, aes(x = First_Dimension, y = Second_Dimension, color = label)) +
-  geom_point(size = 3) +
-  theme_minimal() +
-  labs(title = "Kodama Dimensionality Reduction",
-       x = "First Dimension",
-       y = "Second Dimension",
-       color = "Label")  # Adjusting this to provide a legend title
-
+seu.list <- lapply(seu.list, function(seu) {
+  seu %>% LoadImages(verbose = T, time.resolve = F)
+})
 
 ```
 <br>
@@ -365,8 +407,8 @@ ring.genes <- c("FTH1", "EEF2", "BEST1", "LRRC59", "PRDX1", "CD63", "DYNC1H1", "
                 "PSMB3", "RNF187", "RNASE1", "CFL1", "GRN", "UBC", "TAX1BP3", "COX4I1",
                 "CUTA", "NME1", "H3F3B", "AKR7A2", "IMPDH2")
 
-p1 <- ST.FeaturePlot(seu.list[[1]], ring.genes[1:2], palette = "RdBu", grid.ncol = 2, pt.size = 1.5, slot = "scale.data", center.zero = T, show.sb = F)
-p2 <- ST.FeaturePlot(seu.list[[2]], ring.genes[1:2], palette = "RdBu", grid.ncol = 2, pt.size = 1.5, slot = "scale.data", center.zero = T, show.sb = F)
+p1 <- ST.FeaturePlot(seu.list[[5]], ring.genes[1:6], palette = "RdBu", grid.ncol = 2, pt.size = 1.5, slot = "scale.data", center.zero = T, show.sb = F)
+p2 <- ST.FeaturePlot(seu.list[[6]], ring.genes[1:6], palette = "RdBu", grid.ncol = 2, pt.size = 1.5, slot = "scale.data", center.zero = T, show.sb = F)
 cowplot::plot_grid(p1, p2, ncol = 1, labels = c("Patient E", "Patient F"))
 
 ```
@@ -803,7 +845,7 @@ de.markers.filtered <- lapply(de.markers, function(de) {
   de <- de %>% dplyr::filter(p_val_adj < 1e-2 & avg_logFC > 0.15) %>% arrange(cluster, -avg_logFC)
 })
 
-```For clustering, we'll use the `FindNeighbors` and `FindClusters` functions from Seurat, using the NMF vectors as input and a resolution of 0.4. For each patient, we subset the NMF matrix to include only those vectors that wew manually selected and stored into
+```
 <br>
 
 Read clusters annotations table and add cluster labels to Seurat object meta.data.
