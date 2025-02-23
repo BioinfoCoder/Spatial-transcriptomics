@@ -1,0 +1,282 @@
+---
+title: "MultiCCA_on_samples_ABCDEGHJ_Seurat_v3.1.1"
+author: "Ludvig Larsson"
+date: "9/11/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+<br>
+
+# Analysis of BC tumors
+***
+
+<br>
+```{r setup_env}
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(data.table)
+  library(ggplot2)
+  library(plotly)
+  library(STutility)
+  library(zeallot)
+  library(KODAMA)
+
+})
+
+
+
+options(download.file.method = "curl")  # or "libcurl"
+remotes::install_github("jbergenstrahle/STUtility")
+
+
+install.packages("remotes")
+remotes::install_github("ludvigla/semla")
+install.packages("Seurat")
+setwd("C:/Users/doaad/Downloads/code/her2st-master/scripts")
+
+```
+<br>
+
+## Organize data
+***
+
+We have 8 patient datasets named A, B, C, D, E, F, G and H.
+
+Datasets 1-4 consist of 6 semi-consecutive tissue sections, wehereas the remaining 4 datasets consist of 3 semi-consecutive tissue sections (semi-consecutive = every third section). 
+
+First, set up a meta.data table for the project. We have some limited patient data for patients A-J that we can include providing ER and PgR status. In addition, we need the paths to; gene count matrices, HE images and spot selection files.
+
+<br>
+```{r create_infoTable}
+
+library(openxlsx)
+
+meta_data <- read.xlsx("C:/Users/doaad/Downloads/code/her2st-master/data/clinical_data/10_HER2+_info.xlsx")
+rownames(meta_data) <- meta_data$Sample
+samples <- list.files(pattern = ".tsv", path = "../data/ST-cnts/", full.names = T)
+names(samples) <- substr(do.call(rbind, strsplit(samples, split = "/"))[, 4], start = 1, stop = 2)
+imgs <- list.files(path = "../data/ST-imgs/", recursive = T, full.names = T, pattern = ".jpg")
+names(imgs) <- do.call(rbind, strsplit(imgs, split = "/"))[, 5]
+ids <- names(samples)
+infoTable <- data.frame(samples, imgs = imgs[ids], ids, patient_id = substr(x = ids, start = 1, stop = 1), stringsAsFactors = FALSE)
+infoTable <- cbind(infoTable, meta_data[infoTable$patient_id, ])
+infoTable[, 8:ncol(infoTable)]
+
+```
+<br>
+
+Subset infoTable to include specified datasets.
+
+<br>
+```{r subset}
+
+infoTable$spotfiles <- list.files(path = "../data/ST-spotfiles", full.names = T)[1:36]
+head(infoTable)
+
+```
+<br>
+
+## Load data
+***
+
+Load all patient datasets and merge into one Seurat object per patient. Each gene has to bre present in at least 20 spots per sample and each spot has to have at least 300 unique features (genes).
+
+<br>
+```{r cca_list}
+
+install.packages('R.utils')
+
+# Define patient IDs from A to H
+valid_patients <- LETTERS[1:8]  
+
+# Filter the infoTable to include only these patients
+patients <- unique(infoTable$patient_id)
+patients <- patients[patients %in% valid_patients]  # Keep only A to H
+
+# Initialize an empty list to store results
+seu.list <- list()
+
+# Loop through each patient_id (A to H)
+for (s in patients) {  
+    seu.list[[s]] <- InputFromTable(
+        infotable = subset(infoTable, patient_id == s), 
+        min.gene.spots = 20,
+        min.spot.feature.count = 300,
+        platform = "1k"
+    )
+}
+
+
+```
+<br>
+
+Calculate some QC metrics
+
+<br>
+```{r all_samples_stats}
+
+total.qc <- do.call(rbind, lapply(seu.list, function(se) {
+  data.frame(total_UMIs = sum(se@assays$RNA$counts), nSpots = ncol(se))
+}))
+
+sum(total.qc$nSpots)
+
+```
+<br>
+
+Plot total number of unique features per spot and sample for each patient dataset (3D samples)
+
+<br>
+```{r UMIs_per_sample, fig.width=9, fig.height=9}
+
+for (seu in seu.list[1:4]) {
+    seu <- SetIdent(seu, value = "ids")
+    p1 <- VlnPlot(seu, features = "nFeature_RNA")
+    p2 <- ST.FeaturePlot(seu, features = "nFeature_RNA", palette = "GrRd")
+    plot(cowplot::plot_grid(p1, p2, ncol = 1, rel_heights = c(1, 2)))
+}
+
+```
+<br>
+
+Plot total number of unique features per spot and sample for each patient dataset (remaining samples)
+
+<br>
+```{r UMIs_per_sample, fig.width=9, fig.height=6}
+
+for (seu in seu.list[5:8]) {
+    seu <- SetIdent(seu, value = "ids")
+    p1 <- VlnPlot(seu, features = "nFeature_RNA")
+    p2 <- ST.FeaturePlot(seu, features = "nFeature_RNA", palette = "GrRd")
+    plot(cowplot::plot_grid(p1, p2, ncol = 1, rel_heights = c(1, 1)))
+}
+
+```
+<br>
+
+We will also create a separate seurat object including all the samples to show the inter-heterogeneity across the samples.
+
+<br>
+```{r all_samples_se}
+library(dplyr)
+# Define the patient IDs from A to H
+patient_ids <- LETTERS[1:8]  # Generates "A", "B", ..., "H"
+
+# Create a list to store Seurat objects for each patient
+seu.list <- lapply(patient_ids, function(s) {
+    # Subset the infoTable for the current patient ID
+    subset_table <- subset(infoTable, patient_id == s)
+    
+    # Process the data using InputFromTable
+    seu_obj <- InputFromTable(infotable = subset_table, 
+                              min.gene.spots = 50,
+                              min.spot.feature.count = 300, 
+                              platform = "1k")
+    
+    # Apply SCTransform and PCA
+    seu_obj <- seu_obj %>% SCTransform() %>% RunPCA()
+    
+    return(seu_obj)
+})
+
+# Name the list elements based on patient IDs
+names(seu.list) <- patient_ids
+
+
+```
+<br>
+
+Run UMAP and color spots by patient to viusalize the global differences between patients. 
+
+<br>
+```{r UMAP_all}
+# Run UMAP for each sample in seu.list
+seu.list <- lapply(seu.list, function(seu) {
+  seu <- RunUMAP(seu, reduction = "pca", dims = 1:20)
+  seu <- SetIdent(seu, value = "ids")
+  return(seu)
+})
+
+# Visualize each sample separately
+p_list <- lapply(seu.list, function(seu) {
+  DimPlot(seu) + ggtitle(unique(seu$ids))
+})
+
+# Print all plots
+p_list
+```
+
+
+`
+
+
+
+
+
+
+
+```{r UMAP_all}
+install_github("tkcaccia/KODAMA")
+install.packages("misc3d")
+install_github("tkcaccia/KODAMAextra")
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(doSNOW)
+library(foreach)
+library(iterators)
+library(parallel)
+library(KODAMA)
+library(bluster)
+library(igraph)
+library(devtools)
+library(KODAMAextra)
+
+# Ensure UMAP config is set
+config = umap.defaults
+config$n_sgd_threads = "auto"
+
+# Loop through each patient dataset in seu.list
+for (i in names(seu.list)) {
+  
+  # Run KODAMA analysis
+  seu.list[[i]] <- RunKODAMAmatrix(seu.list[[i]], FUN = "fastpls", landmarks = 100000, splitting = 300, ncomp = 50)
+  seu.list[[i]] <- RunKODAMAvisualization(seu.list[[i]], method = "UMAP", config = config)
+  
+  # Extract stored KODAMA embeddings
+  kodama_dims <- Embeddings(seu.list[[i]], reduction = "KODAMA")
+  
+  # Ensure the dimensions are correctly named
+  df <- data.frame(kodama_dims)
+  colnames(df) <- c("KODAMA_1", "KODAMA_2")
+  
+  # Perform clustering using bluster & igraph
+  snn_graph <- bluster::makeSNNGraph(kodama_dims, k = 30)
+  clusters <- igraph::cluster_walktrap(snn_graph)
+  
+  # Convert clusters to character format
+  cluster_labels <- as.character(membership(clusters))
+  
+  # Assign clusters to metadata
+  seu.list[[i]]@meta.data$clusters <- cluster_labels
+  
+  # Ensure cluster labels are assigned correctly
+  df$KODAMA <- seu.list[[i]]@meta.data$clusters
+  
+  # Generate KODAMA visualization plot
+  p <- ggplot(df, aes(KODAMA_1, KODAMA_2, color = KODAMA)) +
+    geom_point(size = 2) +
+    labs(title = paste("KODAMA Visualization - Patient", i)) +
+    theme_bw() +
+    theme(legend.position = "bottom") +
+    guides(color = guide_legend(nrow = 2, override.aes = list(size = 2)))
+  
+  print(p)  # Display the plot for each patient
+}
+
+```
+
