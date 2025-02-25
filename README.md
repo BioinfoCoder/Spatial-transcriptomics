@@ -1,4 +1,3 @@
-# Spatial-transcriptomics
 # Seurat and Kodama Analysis of HER2+ Breast Cancer Samples
 
 This repository contains an R Markdown file for analyzing **HER2-positive breast cancer (BC) samples** using **Seurat** for single-cell RNA sequencing (scRNA-seq) analysis and **Kodama** for nonlinear dimension reduction.
